@@ -1,0 +1,133 @@
+---
+title: "VGT choice model1 between groups omnibus"
+author: "Eve Limbrick-Oldfield eve@psych.ubc.ca"
+date: "14/08/2019"
+output: html_document
+
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = "***")
+```
+
+# Data prep 
+```{r data prep, include=FALSE}
+library(dplyr)
+library(lme4)
+library(ggplot2)
+library(lattice)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+library(influence.ME)
+library(gmodels)#CI
+library(corrplot)
+
+data_all=read.csv("***.csv")
+participants=read.csv("***.txt")
+GD_participants<-subset(participants,X101>200)
+
+data_all$chosenmag <- ifelse(data_all$choseProspect1==1,data_all$Prospect1mag, data_all$Prospect2mag)
+data_all$outMag<-ifelse(data_all$won_lost==1,data_all$chosenmag,0)
+data_all$PreviousoutMag<-c(0,data_all$outMag[1:nrow(data_all)-1])
+data_all$PreviouschoseProspect1<-c(0,data_all$choseProspect1[1:nrow(data_all)-1])
+data_all$stayShift<- ifelse(data_all$PreviouschoseProspect1==data_all$choseProspect1,0,1)
+data_all$previous_won_lost<- c(0,data_all$won_lost[1:nrow(data_all)-1]) 
+data_all$WinFirst[is.na(data_all$WinFirst)] <- 0 
+data_all$Group<- ifelse(data_all$Participant>300,1,0)
+data_all$mirrored_choice<-ifelse(data_all$condition=="Win",data_all$choseProspect1,(data_all$choseProspect1-1)*-1)
+data_all<- within (data_all, {Group<-factor(Group,levels=0:1,labels = c("CON","GD"))})
+data_all$repetition_centred <-data_all$repetition-5.5
+data_all$PGSI_zeroed<-data_all$PGSI-8
+data_all$participant<-factor(data_all$participant)
+data_all$Druguser<-ifelse(data_all$DAST>0,1,0)
+data_all$Druguser[is.na(data_all$Druguser)] <- 0 
+data_all$AUDIT[is.na(data_all$AUDIT)] <- 0 
+data_all$AUDIT_centred<-data_all$AUDIT-mean(data_all$AUDIT)
+data_all$DASS_TOTAL_centred<-data_all$DASS_TOTAL-mean(data_all$DASS_TOTAL)
+data_all$participant<-factor(data_all$participant)
+EV<- sort(subset(data_all$EVratio, !duplicated(data_all$EVratio)))
+
+```
+
+# Mixed linear models 
+
+## Full model
+```{r full model}
+# Full model. Table S8
+# Don't have repetion is as random effect as rep could vary by condition within participant... Results of model with and without term similar
+fullmodel = glmer(mirrored_choice ~ Group*condition*EVratio + WinFirst*condition*repetition_centred  + (repetition_centred|participant), data=data_all, family = binomial,control = glmerControl(optimizer="bobyqa")) 
+summary(fullmodel)
+
+cc <- confint(fullmodel,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(fullmodel),cc)
+rtab <- exp(ctab)
+print(rtab,digits=5)
+
+# Check model same without rep as some rep might be missing for some participants - check it's not causing trouble
+fullmodel_no_rep = glmer(mirrored_choice ~ Group*condition*EVratio + WinFirst*condition  + (1|participant), data=data_all, family = binomial,control = glmerControl(optimizer="bobyqa")) 
+summary(fullmodel_no_rep)
+```
+
+# Model diagnostics
+
+```{r participant averages}
+# https://journal.r-project.org/archive/2012-2/RJournal_2012-2_Nieuwenhuis~et~al.pdf
+# . Are any participants outliers? Visual inspection
+win_participant_averages<- unique(subset(windata,select=c(participant, EVratio)))
+win_participant_averages$choiceaverage <- with(windata,tapply(choseProspect1, participant, mean))
+# 20 participants in each plot so can view. Are there any participoant outliers? No.
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(1:200),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(201:400),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(401:600),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(601:830),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+
+loss_participant_averages<- unique(subset(lossdata,select=c(participant, EVratio)))
+loss_participant_averages$choiceaverage <- with(lossdata,tapply(choseProspect1, participant, mean))
+# 20 participants in each plot so can view. Are there any participoant outliers? No.
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(1:200),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(201:400),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(401:600),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(601:830),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+```
+
+```{r model residuals}
+# resid plot - are they normal?
+plot(resid(fullmodel))
+
+# Predictor variable linearity - should be same at each level of EV. Looks like smaller resi at high EV (presumably bound by ceiling/floor). 
+ggplot(data.frame(x1=data_all$EVratio,pearson=residuals(fullmodel,type="pearson")),
+      aes(x=x1,y=pearson)) +
+    geom_point() +
+    theme_bw()
+```
+ 
+```{r model dfbetas, fig.height=20, fig.width=10}
+fullmodel_est <- influence(fullmodel, group = "participant") 
+fullmodel_est.dfB <- dfbetas(fullmodel_est)
+plot(fullmodel_est,which="dfbetas",parameters=c(2,4,8),xlab="DFbetaS",ylab="Participant")
+
+fullmodel_rev_est <- influence(fullmodel_rev, group = "participant") 
+fullmodel_rev_est.dfB <- dfbetas(fullmodel_rev_est)
+plot(fullmodel_rev_est,which="dfbetas",parameters=c(2,4,8),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r model cooks, fig.height=20, fig.width=10}
+cooks.distance(fullmodel_est,parameter=2,4,8)
+plot(fullmodel_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+cooks.distance(fullmodel_rev_est,parameter=2,4,8)
+plot(fullmodel_rev_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+
+```
+ 
+``` {r model sigtest}
+sigtest(fullmodel_est, test=1.96)$EVratio
+sigtest(fullmodel_est, test=-1.96)$`GroupGD:EVratio`
+sigtest(fullmodel_est, test=-1.96)$`GroupGD`
+sigtest(fullmodel_rev_est, test=1.96)$EVratio
+sigtest(fullmodel_rev_est, test=-1.96)$`GroupGD:EVratio`
+sigtest(fullmodel_rev_est, test=-1.96)$`GroupGD`
+```
+

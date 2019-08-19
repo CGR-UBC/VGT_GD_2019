@@ -1,0 +1,291 @@
+---
+title: "VGT choice model5 ind diffs GD"
+author: "Eve Limbrick-Oldfield eve@psych.ubc.ca"
+date: "14/08/2019"
+output: html_document
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = "***")
+```
+
+# Data prep
+```{r data prep, include=FALSE}
+library(lme4)
+library(ggplot2)
+library(lattice)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+library(influence.ME)
+
+data_all=read.csv("***.csv")
+participants=read.csv("***.txt")
+GD_participants<-subset(participants,X101>200)
+data_all$chosenmag <- ifelse(data_all$choseProspect1==1,data_all$Prospect1mag, data_all$Prospect2mag)
+data_all$outMag<-ifelse(data_all$won_lost==1,data_all$chosenmag,0)
+data_all$PreviousoutMag<-c(0,data_all$outMag[1:nrow(data_all)-1])
+data_all$PreviouschoseProspect1<-c(0,data_all$choseProspect1[1:nrow(data_all)-1])
+data_all$stayShift<- ifelse(data_all$PreviouschoseProspect1==data_all$choseProspect1,0,1)#0 = stay; 1 = shift
+data_all$previous_won_lost<- c(0,data_all$won_lost[1:nrow(data_all)-1]) 
+data_all$WinFirst[is.na(data_all$WinFirst)] <- 0 # Replace NA with zero
+data_all$Group<- ifelse(data_all$Participant>300,1,0)#0 = stay; 1 = shift
+data_all$mirrored_choice<-ifelse(data_all$condition=="Win",data_all$choseProspect1,(data_all$choseProspect1-1)*-1)
+data_all<- within (data_all, {Group<-factor(Group,levels=0:1,labels = c("CON","GD"))})
+data_all$Group_rev <- relevel(data_all$Group, ref = "GD")
+data_all$condition_rev <- relevel(data_all$condition, ref = "Win")
+data_all$repetition_centred <-data_all$repetition-5.5
+data_all$PGSI_zeroed<-data_all$PGSI-8
+data_all$participant<-factor(data_all$participant)
+data_all$AUDIT[is.na(data_all$AUDIT)] <- 0 # Replace NA with zero
+data_all$AUDIT_centred<-data_all$AUDIT-mean(data_all$AUDIT)
+data_all$Druguser<-ifelse(data_all$DAST>0,1,0)
+data_all$Druguser[is.na(data_all$Druguser)] <- 0 # Replace NA with zero
+data_all$DASS_TOTAL_centred<-data_all$DASS_TOTAL-mean(data_all$DASS_TOTAL)
+data_all$participant<-factor(data_all$participant)
+EV<- sort(subset(data_all$EVratio, !duplicated(data_all$EVratio)))
+data_all$EVr_bin<-ifelse(data_all$EVratio>0,1,0)
+```
+
+```{r subset data, include=FALSE}
+# Create data subsets for models
+lossdata<-subset(data_all,condition=="Loss")
+windata<-subset(data_all,condition=="Win")
+GDlossdata<-subset(lossdata,Group=="GD")
+GDwindata<-subset(windata,Group=="GD")
+GD_data_all<-subset(data_all,Group=="GD")
+
+GD_data_all$GRCS_centred<-GD_data_all$GRCS-mean(GD_data_all$GRCS)
+GDwindata$GRCS_centred<-GDwindata$GRCS-mean(GDwindata$GRCS)
+GDlossdata$GRCS_centred<-GDlossdata$GRCS-mean(GDlossdata$GRCS)
+
+GD_data_all$Fagerstrom_centred<-GD_data_all$Fagerstrom-mean(GD_data_all$Fagerstrom)
+GDwindata$Fagerstrom_centred<-GDwindata$Fagerstrom-mean(GDwindata$Fagerstrom)
+GDlossdata$Fagerstrom_centred<-GDlossdata$Fagerstrom-mean(GDlossdata$Fagerstrom)
+ 
+CONlossdata<-subset(lossdata,Group=="CON")
+CONwindata<-subset(windata,Group=="CON")
+CON_data_all<-subset(data_all,Group=="CON")
+
+CON_data_all$GRCS_centred<-CON_data_all$GRCS-mean(CON_data_all$GRCS)
+CONwindata$GRCS_centred<-CONwindata$GRCS-mean(CONwindata$GRCS)
+CONlossdata$GRCS_centred<-CONlossdata$GRCS-mean(CONlossdata$GRCS)
+
+GD_data_all$DASS_TOTAL_centred<-GD_data_all$DASS_TOTAL-mean(GD_data_all$DASS_TOTAL)
+GDwindata$DASS_TOTAL_centred<-GDwindata$DASS_TOTAL-mean(GDwindata$DASS_TOTAL)
+GDlossdata$DASS_TOTAL_centred<-GDlossdata$DASS_TOTAL-mean(GDlossdata$DASS_TOTAL)
+
+CON_data_all$GRCS_centred<-CON_data_all$GRCS-mean(CON_data_all$GRCS)
+CONwindata$GRCS_centred<-CONwindata$GRCS-mean(CONwindata$GRCS)
+CONlossdata$GRCS_centred<-CONlossdata$GRCS-mean(CONlossdata$GRCS)
+
+GD_data_all$AUDIT_centred<-GD_data_all$AUDIT-mean(GD_data_all$AUDIT)
+GDwindata$AUDIT_centred<-GDwindata$AUDIT-mean(GDwindata$AUDIT)
+GDlossdata$AUDIT_centred<-GDlossdata$AUDIT-mean(GDlossdata$AUDIT)
+
+GD_ind_diffs <- subset(GD_data_all, !duplicated(GD_data_all$participant))
+CON_ind_diffs <- subset(CON_data_all, !duplicated(CON_data_all$participant))
+hist(GD_ind_diffs$GRCS, breaks = 10)
+hist(CON_ind_diffs$GRCS, breaks = 10)
+
+```
+
+# Mixed linear models 
+
+```{r}
+library(corrplot)
+
+cor_matrix<-GD_data_all[,c("DASS_TOTAL","Druguser","Smoker","AUDIT","GRCS","PGSI")]
+corr<-cor(cor_matrix)
+corrplot(corr, method="color", type="lower")
+corrplot(corr, method="number", type="lower",bg="grey")
+```
+
+## GD Win PGSI GRCS model
+```{r GD win PGSI GRCS  model}
+# Table S7b
+GD_win_model_confounds = glmer(choseProspect1 ~ EVratio*PGSI_zeroed + EVratio*GRCS_centred + EVratio*Smoker + EVratio*AUDIT_centred 
+                               + EVratio*Druguser + EVratio*DASS_TOTAL_centred + WinFirst*repetition_centred + (repetition_centred|participant), data=GDwindata, family = binomial,control = glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=1e5)))
+summary(GD_win_model_confounds) 
+
+cc <- confint(GD_win_model_confounds,parm="beta_",method="Wald")  
+ctab <- cbind(est=fixef(GD_win_model_confounds),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+```
+
+```{r GD win PGSI GRCS model plot} 
+# Model predictions
+GD_win_model_pp<-expand.grid(participant=GD_ind_diffs$participant,WinFirst=c(0,1),repetition_centred=0,PGSI_zeroed=c(0,19),GRCS_centred=c(-58,58),EVratio=EV,DASS_TOTAL_centred=0,AUDIT_centred=0, Smoker=c(0,1), Druguser=c(0,1)) 
+GD_win_model_pp$predicted.probs<-predict(GD_win_model_confounds,GD_win_model_pp,type="response")
+
+GD_win_model_pp_PGSI_summary<-GD_win_model_pp %>% 
+  group_by(PGSI_zeroed,EVratio) %>% 
+  summarise(avg=mean(predicted.probs))
+
+# Figure 4a and 4b
+
+GD_win_PGSI_plot<-ggplot(GD_win_model_pp_PGSI_summary, aes(x = EVratio, y = avg, color=factor(PGSI_zeroed))) +
+  geom_line() + 
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +     theme(legend.position = "none") + 
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") + 
+  ggtitle("GD win PGSI")
+ggsave(filename="GD_PGSI_win.pdf", plot=GD_win_PGSI_plot, width = 4.5, height = 4.5 )
+GD_win_PGSI_plot
+
+GD_win_model_pp_GRCS_summary<-GD_win_model_pp %>% 
+  group_by(GRCS_centred,EVratio) %>% 
+  summarise(avg=mean(predicted.probs))
+ 
+GD_win_GRCS_plot<-ggplot(GD_win_model_pp_GRCS_summary, aes(x = EVratio, y = avg, color=factor(GRCS_centred))) +
+  geom_line() + 
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      theme(legend.position = "none") +
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") + 
+  ggtitle("GD win GRCS")
+ggsave(filename="/GD_GRCS_win.pdf", plot=GD_win_GRCS_plot, width = 4.5, height = 4.5 )
+GD_win_GRCS_plot
+```
+### Diagnostics
+
+```{r win PGSI model residuals}
+# resid plot - are they normal?
+plot(resid(GD_win_model))
+```
+
+```{r echo = FALSE}
+# Predictor variable linearity - should be same at each level of EV. Looks like smaller resi at high EV (presumably bound by ceiling/floor). 
+ggplot(data.frame(x1=GDwindata$PGSI_zeroed,pearson=residuals(GD_win_model,type="pearson")),
+      aes(x=x1,y=pearson)) +
+    geom_point() +
+    theme_bw()
+```    
+
+```{r win PGSI model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+GD_win_model_est <- influence(GD_win_model, group = "participant") 
+GD_win_model_est.dfB <- dfbetas(GD_win_model_est)
+plot(GD_win_model_est,which="dfbetas",parameters=c(2,3,6),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r win PGSI_model cooks, fig.height=20, fig.width=10}
+cooks.distance(GD_win_model_est,parameter=2,3,6)
+plot(GD_win_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+
+```
+ 
+``` {r win PGSI model sigtest}
+sigtest(GD_win_model_est, test=1.96)$EVratio
+sigtest(GD_win_model_est, test=1.96)$`EVratio:PGSI_zeroed`
+sigtest(GD_win_model_est, test=1.96)$`EVratio:GRCS_centred`
+sigtest(GD_win_model_est, test=1.96)$PGSI_zeroed
+```
+
+## GD Loss PGSI GRCS model
+```{r GD loss PGSI GRCS model}
+
+GD_loss_model_confounds = glmer(choseProspect1~ EVratio * Smoker +EVratio*PGSI_zeroed + EVratio*GRCS_centred + EVratio*DASS_TOTAL_centred + EVratio*Smoker + EVratio*Druguser + EVratio*AUDIT_centred  + WinFirst*repetition_centred + (repetition_centred|participant), data=GDlossdata, family = binomial,control = glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=1e5)))
+summary(GD_loss_model_confounds) 
+
+cc <- confint(GD_loss_model_confounds,parm="beta_",method = "Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(GD_loss_model_confounds),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+```
+
+### Plot
+GRCS min max: -58 58
+```{r GD loss PGSI GRCS model plot} 
+
+# Model predictions
+GD_loss_model_pp<-expand.grid(participant=GD_ind_diffs$participant,WinFirst=c(0,1),repetition_centred=0,PGSI_zeroed=c(0,19),GRCS_centred=c(-58,58),EVratio=EV,DASS_TOTAL_centred=0,AUDIT_centred=0, Smoker=c(0,1), Druguser=c(0,1)) 
+GD_loss_model_pp$predicted.probs<-predict(GD_loss_model_confounds,GD_loss_model_pp,type="response")
+
+GD_loss_model_pp_PGSI_summary<-GD_loss_model_pp %>% 
+  group_by(PGSI_zeroed,EVratio) %>% 
+  summarise(avg=mean(predicted.probs))
+ 
+# Figure 4 c and d
+GD_loss_PGSI_plot<-ggplot(GD_loss_model_pp_PGSI_summary, aes(x = EVratio, y = avg, color=factor(PGSI_zeroed))) +
+  geom_line() + 
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +  theme(legend.position = "none") +    
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") + 
+  ggtitle("GD loss PGSI")
+ggsave(filename="analysis/choice/model1_GD/GD_PGSI_loss.pdf", plot=GD_loss_PGSI_plot, width = 4.5, height = 4.5 )
+
+GD_loss_PGSI_plot
+
+GD_loss_model_pp_GRCS_summary<-GD_loss_model_pp %>% 
+  group_by(GRCS_centred,EVratio) %>% 
+  summarise(avg=mean(predicted.probs))
+ 
+GD_loss_GRCS_plot<-ggplot(GD_loss_model_pp_GRCS_summary, aes(x = EVratio, y = avg, color=factor(GRCS_centred))) +
+  geom_line() + 
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      
+  theme(panel.border= element_blank()) + theme(legend.position = "none") +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") + 
+  ggtitle("GD loss GRCS")
+ggsave(filename="analysis/choice/model1_GD/GD_GRCS_loss.pdf", plot=GD_loss_GRCS_plot, width = 4.5, height = 4.5 )
+
+GD_loss_GRCS_plot
+```
+### Diagnostocs
+```{r loss PGSI model residuals}
+# resid plot - are they normal?
+plot(resid(GD_loss_model))
+```
+```{r echo = FALSE}
+# Predictor variable linearity - should be same at each level of EV. Looks like smaller resi at high EV (presumably bound by ceiling/floor). 
+ggplot(data.frame(x1=GDlossdata$PGSI_zeroed,pearson=residuals(GD_loss_model,type="pearson")),
+      aes(x=x1,y=pearson)) +
+    geom_point() +
+    theme_bw()
+```    
+
+```{r loss PGSI model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+GD_loss_model_est <- influence(GD_loss_model, group = "participant") 
+GD_loss_model_est.dfB <- dfbetas(GD_loss_model_est)
+plot(GD_loss_model_est,which="dfbetas",parameters=c(2,3,6),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r loss PGSI_model cooks, fig.height=20, fig.width=10}
+cooks.distance(GD_loss_model_est,parameter=2,3,6)
+plot(GD_loss_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+
+```
+
+``` {r loss PGSI model sigtest}
+sigtest(GD_loss_model_est, test=1.96)$EVratio
+sigtest(GD_loss_model_est, test=1.96)$`EVratio:PGSI_zeroed`
+sigtest(GD_loss_model_est, test=1.96)$`EVratio:GRCS_centred`
+sigtest(GD_loss_model_est, test=1.96)$PGSI_zeroed
+```
+
+## Omnibus model to check qual same
+```{r omnibus model}
+GD_full_model_confounds = glmer(mirrored_choice ~ EVratio*PGSI_zeroed*condition + EVratio*GRCS_centred*condition + EVratio*Druguser*condition + EVratio*AUDIT_centred*condition + EVratio*DASS_TOTAL_centred*condition + EVratio*Smoker*condition + WinFirst*repetition_centred + condition*repetition_centred + (repetition_centred|participant),
+                                  data=GD_data_all, family = binomial,control = glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=1e5)))
+summary(GD_full_model_confounds) 
+
+cc <- confint(GD_full_model_confounds,parm="beta_",method ="Wald")  
+ctab <- cbind(est=fixef(GD_full_model_confounds),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+```

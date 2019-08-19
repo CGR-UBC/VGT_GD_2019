@@ -1,0 +1,374 @@
+---
+title: "VGT choice model1 between groups"
+author: "Eve Limbrick-Oldfield eve@psych.ubc.ca"
+date: "14/08/2019"
+output: html_document
+
+
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = "***")
+```
+
+# Data prep 
+```{r data prep, include=FALSE}
+library(dplyr)
+library(lme4)
+library(ggplot2)
+library(lattice)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+library(influence.ME)
+library(gmodels)#CI
+library(corrplot)
+
+data_all=read.csv("***.csv")
+participants=read.csv("***.txt")
+GD_participants<-subset(participants,X101>200)
+
+#Average probability of choosing high p prospect per participant per condition
+chose1<-data_all %>% 
+  dplyr::group_by(Participant,condition) %>% 
+  summarise(average = mean(choseProspect1))
+write.csv(chose1,"pChose1.csv")
+
+high_pchose1<-subset(chose1,average>=0.95)
+low_pchose1<-subset(chose1,average<=0.05)
+
+# Check participants didn't just always choose left or right
+choseLeft<-data_all %>% 
+  group_by(Participant,condition) %>% 
+  summarise(average = mean(choice))
+write.csv(choseLeft,"pChoseLeft.csv")
+
+high_pchoseLeft<-subset(choseLeft,average>=0.9)
+low_pchoseLeft<-subset(choseLeft,average<=0.1)
+
+data_all$chosenmag <- ifelse(data_all$choseProspect1==1,data_all$Prospect1mag, data_all$Prospect2mag)
+data_all$outMag<-ifelse(data_all$won_lost==1,data_all$chosenmag,0)
+data_all$PreviousoutMag<-c(0,data_all$outMag[1:nrow(data_all)-1])
+data_all$PreviouschoseProspect1<-c(0,data_all$choseProspect1[1:nrow(data_all)-1])
+data_all$stayShift<- ifelse(data_all$PreviouschoseProspect1==data_all$choseProspect1,0,1)
+data_all$previous_won_lost<- c(0,data_all$won_lost[1:nrow(data_all)-1]) 
+data_all$WinFirst[is.na(data_all$WinFirst)] <- 0 
+data_all$Group<- ifelse(data_all$Participant>300,1,0)
+data_all$mirrored_choice<-ifelse(data_all$condition=="Win",data_all$choseProspect1,(data_all$choseProspect1-1)*-1)
+data_all<- within (data_all, {Group<-factor(Group,levels=0:1,labels = c("CON","GD"))})
+data_all$repetition_centred <-data_all$repetition-5.5
+data_all$PGSI_zeroed<-data_all$PGSI-8
+data_all$participant<-factor(data_all$participant)
+data_all$Druguser<-ifelse(data_all$DAST>0,1,0)
+data_all$Druguser[is.na(data_all$Druguser)] <- 0 
+data_all$AUDIT[is.na(data_all$AUDIT)] <- 0 
+data_all$AUDIT_centred<-data_all$AUDIT-mean(data_all$AUDIT)
+data_all$DASS_TOTAL_centred<-data_all$DASS_TOTAL-mean(data_all$DASS_TOTAL)
+data_all$participant<-factor(data_all$participant)
+EV<- sort(subset(data_all$EVratio, !duplicated(data_all$EVratio)))
+
+```
+
+```{r predictor correlations}
+data_all$Group.numeric<-as.numeric(data_all$Group)
+cor_matrix<-data_all[,c("DASS_TOTAL","Druguser","Smoker","AUDIT","Group.numeric")]
+corr<-cor(cor_matrix)
+corrplot(corr, method="color", type="lower")
+corrplot(corr, method="number", type="lower",bg="grey")
+```
+
+```{r subset data, include=FALSE}
+lossdata<-subset(data_all,condition=="Loss")
+windata<-subset(data_all,condition=="Win")
+GDlossdata<-subset(lossdata,Group=="GD")
+GDwindata<-subset(windata,Group=="GD")
+GD_data_all<-subset(data_all,Group=="GD")
+
+GD_data_all$GRCS_centred<-GD_data_all$GRCS-mean(GD_data_all$GRCS)
+GDwindata$GRCS_centred<-GDwindata$GRCS-mean(GDwindata$GRCS)
+GDlossdata$GRCS_centred<-GDlossdata$GRCS-mean(GDlossdata$GRCS)
+
+GD_data_all$Fagerstrom_centred<-GD_data_all$Fagerstrom-mean(GD_data_all$Fagerstrom)
+GDwindata$Fagerstrom_centred<-GDwindata$Fagerstrom-mean(GDwindata$Fagerstrom)
+GDlossdata$Fagerstrom_centred<-GDlossdata$Fagerstrom-mean(GDlossdata$Fagerstrom)
+ 
+CONlossdata<-subset(lossdata,Group=="CON")
+CONwindata<-subset(windata,Group=="CON")
+CON_data_all<-subset(data_all,Group=="CON")
+
+CON_data_all$GRCS_centred<-CON_data_all$GRCS-mean(CON_data_all$GRCS)
+CONwindata$GRCS_centred<-CONwindata$GRCS-mean(CONwindata$GRCS)
+CONlossdata$GRCS_centred<-CONlossdata$GRCS-mean(CONlossdata$GRCS)
+
+GD_data_all$DASS_TOTAL_centred<-GD_data_all$DASS_TOTAL-mean(GD_data_all$DASS_TOTAL)
+GDwindata$DASS_TOTAL_centred<-GDwindata$DASS_TOTAL-mean(GDwindata$DASS_TOTAL)
+GDlossdata$DASS_TOTAL_centred<-GDlossdata$DASS_TOTAL-mean(GDlossdata$DASS_TOTAL)
+
+GD_data_all$AUDIT_centred<-GD_data_all$AUDIT-mean(GD_data_all$AUDIT)
+GDwindata$AUDIT_centred<-GDwindata$AUDIT-mean(GDwindata$AUDIT)
+GDlossdata$AUDIT_centred<-GDlossdata$AUDIT-mean(GDlossdata$AUDIT)
+```
+
+# Mixed linear models 
+
+## Win subset model
+```{r win model}
+# win subset - include rep ME so can see what direction EVeffect is in. And interaction with win first as seems likely that rep will have diff effect depending upon whether first or second task
+win_model = glmer(choseProspect1 ~ Group*EVratio + WinFirst*repetition_centred  + (repetition_centred|participant), data=windata, family = binomial,control = glmerControl(optimizer="bobyqa"))
+summary(win_model) 
+
+# win model table S2
+cc <- confint(win_model,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(win_model),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+
+# remove repetition to check not inflated by missing values that we have that could bias random effects model
+win_model_norep= glmer(choseProspect1 ~ Group*EVratio + WinFirst  + (1|participant), data=windata, family = binomial, control = glmerControl(optimizer="bobyqa"))
+summary(win_model_norep) 
+
+# win model with confounds table S3
+win_model_confound_all= glmer(choseProspect1 ~ Group*EVratio*Druguser + Group*EVratio*AUDIT_centred + Group*EVratio*DASS_TOTAL_centred +Group*EVratio*Smoker + WinFirst*repetition_centred  + (repetition_centred|participant), data=windata, family = binomial,control = glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=1e5)))
+summary(win_model_confound_all) 
+
+cc <- confint(win_model_confound_all,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(win_model_confound_all),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+```
+
+### Win plot
+```{r win model plot}
+
+win_means_per_participant<-windata %>% 
+  group_by(Participant,Group,EVratio) %>% 
+  summarise(participant_average = mean(choseProspect1))
+
+win_summary<-win_means_per_participant %>% 
+  group_by(Group,EVratio) %>% 
+  summarise(group_average=mean(participant_average), n=n(), sd=sd(participant_average), se=sd/sqrt(n),lowCI=ci(participant_average)[2],highCI=ci(participant_average)[3])
+
+GDwin_summary<-subset(win_summary,Group=="GD")
+CONwin_summary<-subset(win_summary,Group=="CON")
+
+EV<-c(win_summary[1:10,2])
+
+# Model predictions
+win_model_pp<-expand.grid(participant=participants$X101,WinFirst=c(0,1),repetition_centred=0,Group=c("GD","CON"),EVratio=EV$EVratio)
+win_model_pp$predicted.probs<-predict(win_model,win_model_pp,type="response")
+write.table(win_model_pp,"win_model_pp.csv",sep=",")
+
+win_model_pp<-subset(win_model_pp, Group != "GD" | participant > 200)
+win_model_pp<-subset(win_model_pp, Group != "CON" | participant < 200)
+
+win_model_pp_summary<-win_model_pp %>% 
+  group_by(Group,EVratio) %>% 
+  summarise(average=mean(predicted.probs))
+
+win_means_per_participant$Group <- relevel(win_means_per_participant$Group, ref = "GD")
+
+# Figure 2a
+win_boxplot<-ggplot(win_means_per_participant, aes(x = EVratio, y = participant_average, fill=as.factor(Group),dodge=as.factor(EVratio))) +
+   geom_boxplot(alpha=1,width=0.1)+
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") 
+ggsave(filename="GDvsCON_win_boxplot.pdf", plot=win_boxplot, width = 6, height = 4.5 )
+win_boxplot
+
+# Figure 2b
+win_plot<-ggplot(win_summary, aes(x = EVratio, y = group_average, color=Group, shape=Group)) +
+  geom_point(size=2) + 
+  geom_linerange(aes(ymin=group_average-se, ymax=group_average+se)) +
+  geom_line(data=win_model_pp_summary, mapping = aes( x = EVratio, y = average, color = Group)) + 
+  #geom_smooth(method = "glm", method.args = list(family = binomial), se = FALSE) + (old code line of best fit)
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") 
+ggsave(filename="GDvsCON_win.pdf", plot=win_plot, width = 6, height = 4.5 )
+win_plot
+
+```
+
+### Win model diagnostics
+```{r win model residuals}
+# resid plot - are they normal?
+plot(resid(win_model))
+
+# Predictor variable linearity - should be same at each level of EV. Looks like smaller resi at high EV (presumably bound by ceiling/floor). 
+ggplot(data.frame(x1=windata$EVratio,pearson=residuals(win_model,type="pearson")),
+      aes(x=x1,y=pearson)) +
+    geom_point() +
+    theme_bw()
+```
+
+```{r win model participant averages}
+# https://journal.r-project.org/archive/2012-2/RJournal_2012-2_Nieuwenhuis~et~al.pdf
+# Influence.ME package
+# . Are any participants outliers? Visual inspection
+win_participant_averages<- unique(subset(windata,select=c(participant, EVratio)))
+win_participant_averages$choiceaverage <- with(windata,tapply(choseProspect1, participant, mean))
+# 20 participants in each plot so can view. Are there any participoant outliers? No.
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(1:200),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(201:400),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(401:600),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), win_participant_averages[c(601:830),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+```
+
+```{r win model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+win_model_est <- influence(win_model, group = "participant") 
+win_model_est.dfB <- dfbetas(win_model_est)
+plot(win_model_est,which="dfbetas",parameters=c(2,3,6),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r win model cooks, fig.height=20, fig.width=10}
+cooks.distance(win_model_est,parameter=2,3,6)
+plot(win_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+
+```
+ 
+``` {r win model sigtest}
+sigtest(win_model_est, test=1.96)$EVratio
+sigtest(win_model_est, test=-1.96)$`GroupGD:EVratio`
+sigtest(win_model_est, test=-1.96)$`GroupGD`
+
+```
+
+
+## Loss subset model
+```{r loss model}
+
+# loss subset model Table S2
+loss_model = glmer(choseProspect1 ~ Group*EVratio + WinFirst*repetition_centred  + (repetition_centred|participant), data=lossdata, family = binomial,control = glmerControl(optimizer="bobyqa"))
+summary(loss_model) 
+
+cc <- confint(loss_model,parm="beta_",method = "Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(loss_model),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+
+# remove rep to check not inflated by missing values that we have thaqt could bias random effects model
+loss_model_norep= glmer(choseProspect1~ Group*EVratio + WinFirst  + (1|participant), data=lossdata, family = binomial, control = glmerControl(optimizer="bobyqa"))
+summary(loss_model_norep) 
+
+# loss model with confounds table S3
+loss_model_confound_all= glmer(choseProspect1 ~ Group*EVratio*Druguser +  Group*EVratio*AUDIT_centred + Group*EVratio*DASS_TOTAL_centred + Group*EVratio*Smoker + WinFirst*repetition_centred  + (repetition_centred|participant), data=lossdata, family = binomial,control = glmerControl(optimizer="bobyqa",optCtrl=list(maxfun=1e5)))
+summary(loss_model_confound_all) #DASS id=s most corr with grouo so tried first NOT SIG
+
+cc <- confint(loss_model_confound_all,parm="beta_",method = "Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(loss_model_confound_all),cc)
+rtab <- exp(ctab)
+print(rtab,digits=3)
+```
+
+### Loss plot
+```{r loss model plot}
+# Real data
+loss_means_per_participant<-lossdata %>% 
+  group_by(Participant,Group,EVratio) %>% 
+  summarise(participant_average = mean(choseProspect1))
+
+loss_summary<-loss_means_per_participant %>% 
+  group_by(Group,EVratio) %>% 
+  summarise(group_average=mean(participant_average), average2=median(participant_average), n=n(), sd=sd(participant_average), se=sd/sqrt(n),lowCI=ci(participant_average)[2],highCI=ci(participant_average)[3])
+
+loss_summary$CI<-loss_summary$highCI-loss_summary$lowCI
+GDloss_summary<-subset(loss_summary,Group=="GD")
+CONloss_summary<-subset(loss_summary,Group=="CON")
+
+EV<-c(loss_summary[1:10,2])
+
+# Model predictions
+
+loss_model_pp<-expand.grid(participant=participants$X101,WinFirst=c(0,1),repetition_centred=0,Group=c("GD","CON"),EVratio=EV$EVratio)
+loss_model_pp$predicted.probs<-predict(loss_model,loss_model_pp,type="response")
+write.table(loss_model_pp,"loss_model_pp.csv",sep=",")
+
+loss_model_pp<-subset(loss_model_pp, Group != "GD" | participant > 200)
+loss_model_pp<-subset(loss_model_pp, Group != "CON" | participant < 200)
+
+loss_model_pp_summary<-loss_model_pp %>% 
+  group_by(Group,EVratio) %>% 
+  summarise(average=mean(predicted.probs))
+  
+loss_means_per_participant$Group <- relevel(loss_means_per_participant$Group, ref = "GD")
+
+# Figure 4a
+loss_boxplot<-ggplot(loss_means_per_participant, aes(x = EVratio, y = participant_average, fill=as.factor(Group),dodge=as.factor(EVratio))) +
+   geom_boxplot(alpha=1,width=0.1)+
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") 
+ggsave(filename="GDvsCON_loss_boxplot.pdf", plot=loss_boxplot, width = 6, height = 4.5 )
+loss_boxplot
+
+# Figure 4b
+loss_plot<-ggplot(loss_summary, aes(x = EVratio, y = group_average, color=Group, shape=Group)) +
+  geom_point(size=2) + 
+  geom_linerange(aes(ymin=group_average-se, ymax=group_average+se)) +
+  geom_line(data=loss_model_pp_summary, mapping = aes( x = EVratio, y = average, color = Group)) + 
+  #geom_smooth(method = "glm", method.args = list(family = binomial), se = FALSE) + (old code line of best fit)
+  scale_y_continuous(breaks=seq(0,1,0.2),limits=c(0, 1),expand=c(0,0))  +
+  scale_x_continuous(limits=c(-1, 1),expand=c(0,0))  +
+  theme_bw() +theme(plot.background = element_blank(),panel.grid.major = element_blank(),panel.grid.minor = element_blank()) +      
+  theme(panel.border= element_blank()) +
+  theme(axis.line.x = element_line(color="black", size = 0.5),
+        axis.line.y = element_line(color="black", size = 0.5)) + ylab("p(High probability prospect)") 
+ggsave(filename="GDvsCON_loss.pdf", plot=loss_plot, width = 6, height = 4.5 )
+
+loss_plot
+```
+
+### Diagnostics
+```{r loss model residuals}
+# resid plot - are they normal?
+plot(resid(loss_model))
+
+# Predictor variable linearity - should be same at each level of EV. Looks like smaller resi at high EV (presumably bound by ceiling/floor). 
+ggplot(data.frame(x1=lossdata$EVratio,pearson=residuals(loss_model,type="pearson")),
+      aes(x=x1,y=pearson)) +
+    geom_point() +
+    theme_bw()
+```
+
+```{r loss model participant averages}
+# https://journal.r-project.org/archive/2012-2/RJournal_2012-2_Nieuwenhuis~et~al.pdf
+# Influence.ME package
+# . Are any participants outliers? Visual inspection
+loss_participant_averages<- unique(subset(lossdata,select=c(participant, EVratio)))
+loss_participant_averages$choiceaverage <- with(lossdata,tapply(choseProspect1, participant, mean))
+# 20 participants in each plot so can view. Are there any participoant outliers? No.
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(1:200),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(201:400),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(401:600),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+dotplot(choiceaverage ~ factor(participant), loss_participant_averages[c(601:830),], type=c("p","a"), xlab="Participant",ylab="Average choice")
+```
+
+```{r loss model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+loss_model_est <- influence(loss_model, group = "participant") 
+loss_model_est.dfB <- dfbetas(loss_model_est)
+plot(loss_model_est,which="dfbetas",parameters=c(2,3,6),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r loss model cooks, fig.height=20, fig.width=10}
+cooks.distance(loss_model_est,parameter=2,3,6)
+plot(loss_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+```
+ 
+``` {r loss model sigtest}
+sigtest(loss_model_est, test=-1.96)$EVratio
+sigtest(loss_model_est, test=1.96)$`GroupGD:EVratio`
+sigtest(loss_model_est, test=1.96)$`GroupGD`
+```

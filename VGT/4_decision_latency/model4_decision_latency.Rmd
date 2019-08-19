@@ -1,0 +1,135 @@
+---
+title: "VGT model 4 decision latency between groups"
+author: "Eve Limbrick-Oldfield eve@psych.ubc.ca"
+date: "14/08/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = "***")
+
+```
+# Data prep
+```{r data prep, include=FALSE}
+library(lme4)
+library(ggplot2)
+library(lattice)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+library(influence.ME)
+
+data_all=read.csv("***.csv")
+participants=read.csv("***txt")
+GD_participants<-subset(participants,X101>200)
+
+data_all$chosenmag <- ifelse(data_all$choseProspect1==1,data_all$Prospect1mag, data_all$Prospect2mag)
+data_all$outMag<-ifelse(data_all$won_lost==1,data_all$chosenmag,0)
+data_all$PreviousoutMag<-c(0,data_all$outMag[1:nrow(data_all)-1])
+data_all$PreviouschoseProspect1<-c(0,data_all$choseProspect1[1:nrow(data_all)-1])
+data_all$stayShift<- ifelse(data_all$PreviouschoseProspect1==data_all$choseProspect1,0,1)#0 = stay; 1 = shift
+data_all$previous_won_lost<- c(0,data_all$won_lost[1:nrow(data_all)-1]) 
+data_all$WinFirst[is.na(data_all$WinFirst)] <- 0 # Replace NA with zero
+data_all$Group<- ifelse(data_all$Participant>300,1,0)#0 = stay; 1 = shift
+data_all$mirrored_choice<-ifelse(data_all$condition=="Win",data_all$choseProspect1,(data_all$choseProspect1-1)*-1)
+data_all<- within (data_all, {Group<-factor(Group,levels=0:1,labels = c("CON","GD"))})
+data_all$Group_rev <- relevel(data_all$Group, ref = "GD")
+data_all$condition_rev <- relevel(data_all$condition, ref = "Win")
+data_all$repetition_centred <-data_all$repetition-5.5
+data_all$PGSI_zeroed<-data_all$PGSI-8
+data_all$participant<-factor(data_all$participant)
+
+EV<- sort(subset(data_all$EVratio, !duplicated(data_all$EVratio)))
+
+```
+
+```{r subset data, include=FALSE}
+# Create data subsets for models
+lossdata<-subset(data_all,condition=="Loss")
+windata<-subset(data_all,condition=="Win")
+GDlossdata<-subset(lossdata,Group=="GD")
+GDwindata<-subset(windata,Group=="GD")
+GD_data_all<-subset(data_all,Group=="GD")
+```
+ 
+ 
+## Remove outliers from win data. 
+Use hybrid method from Van Selst & Jolicoeur (1994) - R code adapted from https://figshare.com/articles/RT_Trimming_ToolBox_zip/717189.
+
+```{r WIN data remove RT outliers}
+source("analysis/RT/MRtrim.R")
+RT_data<-data.frame(windata$trial,windata$Participant,as.factor(windata$EVratio),windata$Decision_RT)
+names(RT_data) <- c("Trial","Participant","condition","RT")
+winMRtrimoutput<-MRtrim(RT_data,1,5)#call RT trimming function - don;t removed min, or ius sample size < 5
+windata_with_modRT<-cbind(windata,winMRtrimoutput$trimmed_data_withNAs)
+windata_trimmed<-windata_with_modRT[complete.cases(windata_with_modRT[ , "mod_RT"]),]
+winremovedTrials<-windata_with_modRT[is.na(windata_with_modRT$mod_RT),]
+write.table(winMRtrimoutput$removedCount,"winRT_removed_trials_count.csv",sep=",")
+write.table(winremovedTrials,"winRT_removed_trials.csv",sep=",")
+windata_with_modRT$removed<-(is.na(windata_with_modRT$mod_RT)==TRUE)
+write.table(windata_trimmed,"windata_trimmed.csv",sep=",")
+```
+
+```{r loss data remove RT outliers}
+source("analysis/RT/MRtrim.R")
+RT_data<-data.frame(lossdata$trial,lossdata$Participant,as.factor(lossdata$EVratio),lossdata$Decision_RT)
+names(RT_data) <- c("Trial","Participant","condition","RT")
+lossMRtrimoutput<-MRtrim(RT_data,1,5)#call RT trimming function - don;t removed min, or ius sample size < 5
+lossdata_with_modRT<-cbind(lossdata,lossMRtrimoutput$trimmed_data_withNAs)
+lossdata_trimmed<-lossdata_with_modRT[complete.cases(lossdata_with_modRT[ , "mod_RT"]),]
+lossremovedTrials<-lossdata_with_modRT[is.na(lossdata_with_modRT$mod_RT),]
+write.table(lossMRtrimoutput$removedCount,"lossRT_removed_trials_count.csv",sep=",")
+write.table(lossremovedTrials,"lossRT_removed_trials.csv",sep=",")
+lossdata_with_modRT$removed<-(is.na(lossdata_with_modRT$mod_RT)==TRUE)
+write.table(lossdata_trimmed,"lossdata_trimmed.csv",sep=",")
+```
+
+# Models
+Use absolute EVratio value - as expect decisions to take longer when EV ratio is absolutely smaller - and longer cloer to 1 and -1.
+Run log and not logged RT models. Report not logged if the same model results.
+
+## Win models
+```{r win model}
+# Table S6a
+win_model = lmer(Decision_RT ~ Group*abs(EVratio) + WinFirst*repetition_centred  + (repetition_centred|participant), data=windata_trimmed,control=lmerControl(optimizer="bobyqa"))
+summary(win_model) 
+
+cc <- confint(win_model,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(win_model),cc)
+print(ctab,digits=5)
+
+win_model_log = lmer(log(Decision_RT) ~ Group*abs(EVratio) + WinFirst*repetition_centred  + (repetition_centred|participant), data=windata_trimmed)
+summary(win_model_log) 
+# Fixed effects to check missing data point from outlier removal not doing anything bad to model
+win_model_FE = lm(Decision_RT ~ abs(EVratio) + Group:abs(EVratio) + repetition_centred + WinFirst:repetition_centred  + participant -1, data=windata_trimmed)
+summary(win_model_FE) 
+```
+
+## Loss models
+```{r loss model}
+#Table S6b
+loss_model = lmer(Decision_RT ~ Group*abs(EVratio) + WinFirst*repetition_centred  + (repetition_centred|participant), data=lossdata_trimmed,control=lmerControl(optimizer="bobyqa"))
+summary(loss_model) 
+
+cc <- confint(loss_model,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(loss_model),cc)
+print(ctab,digits=5)
+# Fixed effects to check missing data point from outlier removal not doing anything bad to model
+loss_model_log = lmer(log(Decision_RT) ~ Group*abs(EVratio) + WinFirst*repetition_centred  + (repetition_centred|participant), data=lossdata_trimmed)
+summary(loss_model_log) 
+
+loss_model_FE = lm(Decision_RT ~ abs(EVratio) + Group:abs(EVratio) + repetition_centred+ WinFirst:repetition_centred  + participant -1, data=lossdata_trimmed)
+summary(loss_model_FE)
+```
+
+## Omnibus model to check qual same
+```{r omnibus model}
+data_trimmed<-rbind(windata_trimmed,lossdata_trimmed)
+fullmodel = lmer(Decision_RT ~ Group*abs(EVratio)*condition + WinFirst*repetition_centred*condition  + (repetition_centred|participant), data=data_trimmed,control=lmerControl(optimizer="bobyqa"))
+summary(fullmodel) 
+
+cc <- confint(fullmodel,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(fullmodel),cc)
+print(ctab,digits=5)
+```

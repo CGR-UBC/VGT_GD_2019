@@ -1,0 +1,189 @@
+---
+title: "VGT choice model 2 probability and magnitude"
+author: "Eve Limbrick-Oldfield eve@psych.ubc.ca"
+date: "14/08/2019"
+output: html_document
+---
+
+Model2: Group in interaction with probability LR variable & cues in interaction with magnitude LR variable; order as fixed factor. 
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_knit$set(root.dir = "***")
+```
+
+# Data prep
+```{r data prep, include=FALSE}
+library(lme4)
+library(ggplot2)
+library(lattice)
+library(lmerTest)
+library(emmeans)
+library(tidyverse)
+library(influence.ME)
+library(car)
+
+data_all=read.csv("***.csv")
+participants=read.csv("***.txt")
+GD_participants<-subset(participants,X101>200)
+
+data_all$chosenmag <- ifelse(data_all$choseProspect1==1,data_all$Prospect1mag, data_all$Prospect2mag)
+data_all$outMag<-ifelse(data_all$won_lost==1,data_all$chosenmag,0)
+data_all$PreviousoutMag<-c(0,data_all$outMag[1:nrow(data_all)-1])
+data_all$PreviouschoseProspect1<-c(0,data_all$choseProspect1[1:nrow(data_all)-1])
+data_all$stayShift<- ifelse(data_all$PreviouschoseProspect1==data_all$choseProspect1,0,1)#0 = stay; 1 = shift
+data_all$previous_won_lost<- c(0,data_all$won_lost[1:nrow(data_all)-1]) 
+data_all$WinFirst[is.na(data_all$WinFirst)] <- 0 # Replace NA with zero
+data_all$Group<- ifelse(data_all$Participant>300,1,0)#0 = stay; 1 = shift
+data_all$mirrored_choice<-ifelse(data_all$condition=="Win",data_all$choseProspect1,(data_all$choseProspect1-1)*-1)
+data_all<- within (data_all, {Group<-factor(Group,levels=0:1,labels = c("CON","GD"))})
+data_all$Group_rev <- relevel(data_all$Group, ref = "GD")
+data_all$condition_rev <- relevel(data_all$condition, ref = "Win")
+data_all$repetition_centred <-data_all$repetition-5.5
+data_all$PGSI_zeroed<-data_all$PGSI-8
+data_all$participant<-factor(data_all$participant)
+
+```
+## Isometric log ratio transformations, since both probabilities and magnitudes are compositional data. 
+```{r ILR transformations}
+z <- cbind(data_all$Prospect1prob,data_all$Prospect2prob)
+zz <- cbind(data_all$Prospect2mag,data_all$Prospect1mag)
+
+ilr <- function(z, p=0) {
+  y <- log(z)
+  if(p != 0) y <- (exp(p * y)-1)/p   #box cox transformation
+  y <- y - rowMeans(y, na.rm = TRUE) #recentered values
+  k <- dim(y)[2]
+  H <- contr.helmert(k)              #dimensions k by k-1
+  H <- t(H)/sqrt((2:k)*(2:k-1))      #dimensions k-1 by k
+  return(y %*% t(H))                 #Rotated/reflected values
+}
+
+y <- ilr(z)
+colnames(y) <- paste0("probsLR.",1:(2-1))
+yy <- ilr(zz)  #for magnitudes
+colnames(yy) <- paste0("magsLR.",1:(2-1))
+data_all$probsRound <- round(y,digits=2)
+data_all$magsRound <- round(yy, digits = 2)
+data_all$probsRound_centred<-data_all$probsRound-mean(data_all$probsRound)
+data_all$magsRound_centred<-data_all$magsRound-mean(data_all$magsRound)
+data_all$probsScaled<-scale(data_all$probsRound)
+data_all$magsScaled<-scale(data_all$magsRound)
+```
+
+```{r subset data, include=FALSE}
+# Create data subsets for models
+lossdata<-subset(data_all,condition=="Loss")
+windata<-subset(data_all,condition=="Win")
+windata$GRCS_centred<-windata$GRCS-mean(windata$GRCS)
+lossdata$GRCS_centred<-lossdata$GRCS-mean(lossdata$GRCS)
+
+GDlossdata<-subset(lossdata,Group=="GD")
+GDwindata<-subset(windata,Group=="GD")
+GD_data_all<-subset(data_all,Group=="GD")
+
+GD_data_all$GRCS_centred<-GD_data_all$GRCS-mean(GD_data_all$GRCS)
+GDwindata$GRCS_centred<-GDwindata$GRCS-mean(GDwindata$GRCS)
+GDlossdata$GRCS_centred<-GDlossdata$GRCS-mean(GDlossdata$GRCS)
+
+GD_data_all$probsRound_centred<-GD_data_all$probsRound-mean(GD_data_all$probsRound)
+GDwindata$probsRound_centred<-GDwindata$probsRound-mean(GDwindata$probsRound)
+GDlossdata$probsRound_centred<-GDlossdata$probsRound-mean(GDlossdata$probsRound)
+
+GD_data_all$magsRound_centred<-GD_data_all$magsRound-mean(GD_data_all$magsRound)
+GDwindata$magsRound_centred<-GDwindata$magsRound-mean(GDwindata$magsRound)
+GDlossdata$magsRound_centred<-GDlossdata$magsRound-mean(GDlossdata$magsRound)
+
+CONlossdata<-subset(lossdata,Group=="CON")
+CONwindata<-subset(windata,Group=="CON")
+CON_data_all<-subset(data_all,Group=="CON")
+
+CON_data_all$GRCS_centred<-CON_data_all$GRCS-mean(CON_data_all$GRCS)
+CONwindata$GRCS_centred<-CONwindata$GRCS-mean(CONwindata$GRCS)
+CONlossdata$GRCS_centred<-CONlossdata$GRCS-mean(CONlossdata$GRCS)
+
+```
+
+# Mixed linear models
+
+## Win model
+```{r win model} 
+# Table S4a
+pm_win_model = glmer(choseProspect1 ~ Group*probsRound_centred + Group*magsRound_centred  + WinFirst*repetition_centred+ (repetition_centred|participant), data=windata, family = binomial,control = glmerControl(optimizer="bobyqa"))
+summary(pm_win_model) 
+
+# win model
+cc <- confint(pm_win_model,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(pm_win_model),cc)
+rtab <- exp(ctab)
+print(rtab,digits=5)
+```
+### Diagnostocs
+```{r win model residuals}
+# resid plot - are they normal?
+plot(resid(pm_win_model))
+```
+
+```{r win model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+pm_win_model_est <- influence(pm_win_model, group = "participant") 
+pm_win_model_est.dfB <- dfbetas(pm_win_model_est)
+plot(pm_win_model_est,which="dfbetas",parameters=c(2,3,4,7,8),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r win model cooks, fig.height=20, fig.width=10}
+cooks.distance(pm_win_model_est,parameter=2,3,4,7,8)
+plot(pm_win_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+```
+ 
+``` {r win model sigtest}
+sigtest(pm_win_model_est, test=1.96)$`GroupGD`
+sigtest(pm_win_model_est, test=1.96)$probsRound_centred
+sigtest(pm_win_model_est, test=1.96)$magsRound_centred
+sigtest(pm_win_model_est, test=1.96)$`GroupGD:probsRound_centred `
+sigtest(pm_win_model_est, test=1.96)$`GroupGD:magsRound_centred `
+```
+
+## Loss model
+```{r loss model}
+pm_loss_model = glmer(choseProspect1 ~ Group*probsRound_centred + Group*magsRound_centred  + WinFirst*repetition_centred+ (repetition_centred|participant), data=lossdata, family = binomial,control = glmerControl(optimizer="bobyqa"))
+summary(pm_loss_model) 
+
+cc <- confint(pm_loss_model,parm="beta_",method="Wald")  ## slow (~ 11 seconds)
+ctab <- cbind(est=fixef(pm_loss_model),cc)
+rtab <- exp(ctab)
+print(rtab,digits=7)
+```
+
+### Diagnostics
+```{r loss model residuals}
+# resid plot - are they normal?
+plot(resid(pm_loss_model))
+```
+ 
+```{r loss model dfbetas, fig.height=20, fig.width=10}
+# Run influence.ME to do mathematical of above
+pm_loss_model_est <- influence(pm_loss_model, group = "participant") 
+pm_loss_model_est.dfB <- dfbetas(pm_loss_model_est)
+plot(pm_loss_model_est,which="dfbetas",parameters=c(2,3,4,7,8),xlab="DFbetaS",ylab="Participant")
+```
+ 
+```{r loss model cooks, fig.height=20, fig.width=10}
+cooks.distance(pm_loss_model_est,parameter=2,3,4,7,8)
+plot(pm_loss_model_est,which ='cook' , sort=TRUE, xlab="Cook´s Distance", ylab="Participant")
+```
+ 
+``` {r loss model sigtest}
+sigtest(pm_loss_model_est, test=1.96)$`GroupGD`
+sigtest(pm_loss_model_est, test=1.96)$probsRound_centred
+sigtest(pm_loss_model_est, test=1.96)$magsRound_centred
+sigtest(pm_loss_model_est, test=1.96)$`GroupGD:probsRound_centred `
+sigtest(pm_loss_model_est, test=1.96)$`GroupGD:magsRound_centred `
+```
+
+## Omnibus model to check qual same
+```{r omnibus model}
+pm_full_model = glmer(mirrored_choice ~ Group*probsRound_centred*condition + Group*magsRound_centred*condition + WinFirst*condition + repetition_centred*condition + (1|participant), data=data_all, family = binomial, control = glmerControl(optimizer="bobyqa"))
+summary(pm_full_model) 
+```
+
