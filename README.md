@@ -1,5 +1,5 @@
 # VGTstudy_2019
-Analysis scripts for [insert pubmed link].
+Analysis scripts for https://doi.org/10.1556/2006.2020.00088
 
 ## Contents
 
